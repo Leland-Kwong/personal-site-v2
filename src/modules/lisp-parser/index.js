@@ -1,6 +1,9 @@
+/* eslint-disable prefer-destructuring */
 // (tokenize source)[https://github.com/coderaiser/lisp/blob/master/lib/lexer/tokenize.js]
 
 /** Lisp-style tokenizer */
+
+// TODO: add support for record types?
 
 const isString = str => typeof str === 'string';
 
@@ -19,7 +22,7 @@ function tokenize(expression) {
     return '';
   };
 
-  let txt = expression;
+  let txt = expression.trim();
 
   while (txt) { txt = txt.replace(regexp, add); }
 
@@ -35,64 +38,49 @@ const makeTabs = (depth) => {
 };
 
 const fnTypeNames = {
-  DOMAttribute: 'domAttr',
+  DOMProp: 'domProp',
   DOMElement: 'domEl',
   customFuncContext: 'funcs',
 };
 
-const makeId = (() => {
-  let id = 0;
-  return () => {
-    id += 1;
-    return id;
-  };
-})();
-
-const propsById = {};
-
 const fnTypeValues = {
-  DOMAttribute: name => (...args) => ({ type: 'attr', name, args }),
+  DOMProp: name => (...args) => ({ type: 'attr', name, args }),
   // parses args and returns an html string representation of the element
-  DOMElement: (tagName, indentationDepth, options = {}) => (...args) => {
-    const { pretty } = options;
-    const propsId = makeId();
-    propsById[propsId] = {};
-    return args.reduce((html, directive, i) => {
-      const isAttr = typeof directive === 'object' && directive.type === 'attr';
-      if (isAttr) {
-        const { name: attrName, args: attrArgs } = directive;
-        propsById[propsId][attrName] = attrArgs;
-        // inner html content
-      } else {
-        const tabs = (pretty && i === 2) ? makeTabs(indentationDepth + 1) : '';
+  DOMElement: tagName => (...args) => args.reduce((vNode, directive) => {
+    const { props, children } = vNode;
+    const isAttr = typeof directive === 'object' && directive.type === 'attr';
+    if (isAttr) {
+      const { name: propName, args: attrArgs } = directive;
+      if (propName === 'key') {
         // eslint-disable-next-line no-param-reassign
-        html += `${tabs}${directive}`;
+        vNode.key = attrArgs[0];
+      } else {
+        props[propName] = attrArgs;
       }
-      const isLast = i === args.length - 1;
-      if (isLast) {
-        const tabs = pretty ? makeTabs(indentationDepth) : '';
-        return `
-${tabs}<${tagName} data-props="${propsId}">
-${html}
-${tabs}</${tagName}>
-        `.trim();
-      }
-      return html;
-    }, '');
-  },
+    } else {
+      children.push(directive);
+    }
+    return vNode;
+  }, {
+    tagName,
+    props: {},
+    children: [],
+  }),
 };
 
-const toFuncName = (token, funcContext, indentationDepth, options) => {
-  const isDOMAttr = token.charAt(0) === ':';
-  if (isDOMAttr) {
-    const attrName = token.substring(1);
-    return `${fnTypeNames.DOMAttribute}('${attrName}')`;
+const toFuncName = (token, funcContext, macroFuncContext) => {
+  const isDOMProp = token.charAt(0) === ':';
+  if (isDOMProp) {
+    const propName = token.substring(1);
+    return `${fnTypeNames.DOMProp}('${propName}')`;
   }
-  const opts = options ? JSON.stringify(options) : '';
+  if (macroFuncContext[token]) {
+    return `macros['${token}']`;
+  }
   return funcContext[token]
     // custom functions map context
     ? `${fnTypeNames.customFuncContext}['${token}']`
-    : `${fnTypeNames.DOMElement}('${token}', ${indentationDepth}, ${opts})`;
+    : `${fnTypeNames.DOMElement}('${token}')`;
 };
 
 /*
@@ -100,13 +88,15 @@ const toFuncName = (token, funcContext, indentationDepth, options) => {
   Example:
     `(myFunc arg1 arg2)` transforms to `myFunc(arg1, arg2)`
 */
-const parenthesize = (tokens, funcContext, options) => {
+const toVDOMFunc = (tokens, funcContext, ctxName = 'ctx', macros = {}) => {
   let isNewGroup = false;
   let body = '';
+  const ctx = ctxName;
 
   let depth = 0;
   while (tokens.length) {
     const t = tokens.shift();
+    const firstChar = t.charAt(0);
 
     const groupStart = '(';
     const groupEnd = ')';
@@ -119,17 +109,31 @@ const parenthesize = (tokens, funcContext, options) => {
     const isFuncToken = !isGroupStart && isNewGroup;
     // first arg is a function call
     if (isFuncToken) {
-      const funcCall = toFuncName(t, funcContext, depth, options);
+      const macroFn = macros[t];
+      const funcCall = toFuncName(t, funcContext, macros);
       isNewGroup = false;
       body += (`\n${makeTabs(depth)}${funcCall}( `);
+
+      if (macroFn) {
+        body += `\n${makeTabs(depth + 1)}${ctx},`;
+      }
+
       depth += 1;
     // function arg
     } else if (!isGroupStart && !isGroupEnd) {
-      const isVariable = (t.charAt(0) !== '"') && Number.isNaN(Number(t));
+      const isVariable = (firstChar !== '"') && Number.isNaN(Number(t));
       let arg;
       if (isVariable) {
-        const keypath = t.replace(/\.[0-9]+?/g, frag => `[${frag.substring(1)}]`);
-        arg = `ctx.${keypath}`;
+        if (t.indexOf(ctx) === 0) {
+          arg = t;
+        } else {
+          /*
+            Convert '.' keypath notation to bracket notation so we can
+            handle various different key types.
+          */
+          const keypath = t.replace(/\.[0-9]+?/g, frag => `[${frag.substring(1)}]`);
+          arg = `${ctx}.${keypath}`;
+        }
       } else {
         arg = t;
       }
@@ -144,51 +148,107 @@ const parenthesize = (tokens, funcContext, options) => {
       body += `\n${tabs}${groupEnd}${argSeparator}\n${tabs}`;
     }
   }
+
   const argNames = Object.values(fnTypeNames);
   // eslint-disable-next-line no-new-func
-  return new Function(...argNames, 'ctx', `return (${body});`);
+  const compiledFn = new Function(...argNames, ctx, 'macros', `return (${body});`);
+  const fn = context => compiledFn(
+    fnTypeValues.DOMProp,
+    fnTypeValues.DOMElement,
+    funcContext,
+    context,
+    macros,
+  );
+  fn.source = body;
+  return fn;
 };
 
-const customFuncs = {
-  parse: () => {},
-  // get property from immutable
-  '#': () => {},
-  str: (...strings) => strings.join(''),
-};
+const Immutable = require('immutable');
 
-const context = {
-  foo: 'FOO',
-  bar: 'BAR',
-  list: [1, 2],
-  incrementBy: 1,
-};
 
-const expression = `
-  (div
-    (:type "text")
-    (:class foo bar list.0)
+(() => {
+  const customFuncs = {
+    parse: (ctx) => {
+      console.log(ctx);
+    },
+    str: (...strings) => strings.join(''),
+    record: (...args) => {
+      const obj = {};
+      for (let i = 0; i < args.length; i += 2) {
+        const k = args[i];
+        const v = args[i + 1];
+        obj[k] = v;
+      }
+      return obj;
+    },
+  };
+  const context = {
+    foo: 'FOO',
+    bar: 'BAR',
+    list: [1, 2],
+    incrementBy: 1,
+  };
 
-    (button
-      (:class "lorem-paragraph")
-      (:click "increment" incrementBy 1.2)
+  const expression = `
+    (div
+      (:randoProp (record
+        "foo" foo
+        "bar" bar))
+      (:type "text")
+      (:class foo bar list.0)
+      (:key list.1)
 
-      (str "text content." foo bar)
+      (button
+        (:class "lorem-paragraph")
+        (:click "increment" incrementBy 1.2)
+
+        (str "text content" foo bar)
+      )
+
+      "div child"
     )
-  )
-`.trim();
+  `;
+  const tokens = tokenize(expression);
+  const createVDOM = toVDOMFunc(tokens, customFuncs);
 
-const tokens = tokenize(expression);
-const uiTemplate = parenthesize(tokens, customFuncs, { pretty: true });
-// console.log(uiTemplate);
-const result = uiTemplate(
-  fnTypeValues.DOMAttribute,
-  fnTypeValues.DOMElement,
-  customFuncs,
-  context,
-);
+  // const result = createVDOM(context);
+  // console.log(createVDOM.source, result);
+})();
 
-console.log(result);
+(() => {
+  const customFuncs = {
+    immutableGet: (immutableObject, keypath) => {
+      const path = keypath.split('.');
+      return immutableObject.getIn(path);
+    },
+    List: immutableList => immutableList.toArray(),
+  };
+  const macros = {
+    // shorthand for immutable path get
+    '#': (ctx, path) => customFuncs.immutableGet(ctx, path),
+  };
+  const context = Immutable.fromJS({
+    foo: {
+      bar: 'bar',
+    },
+    list: [1, 2, 3],
+  });
+  const createVDOM = toVDOMFunc(
+    tokenize(`
+      (div (# "foo.bar")
+        (custom-elem "a" "b")
 
-// Object.entries(propsById).forEach(([k, v]) => {
-//   console.log(k, v);
-// });
+        (ui-list
+          (List (# "list")))
+      )
+    `),
+    customFuncs,
+    '$',
+    macros,
+  );
+  const result = createVDOM(context);
+  console.log(
+    createVDOM.source,
+    result,
+  );
+})();
