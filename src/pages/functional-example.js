@@ -119,17 +119,6 @@ const initialState = {
   asyncItemId: '',
 };
 
-(() => {
-  const subject = new Subject();
-  subject.pipe(
-    distinctUntilChanged(),
-    switchMap(v => v),
-  ).subscribe(v => console.log(v));
-  const data1 = from(Promise.resolve([1, 2, 3]));
-  subject.next(data1);
-  subject.next(data1);
-})();
-
 const WithAsyncData = ({ itemId = '' }) => (
   <Async
     input={`https://jsonplaceholder.typicode.com/todos/${itemId}`}

@@ -13,6 +13,8 @@ by treating the `#` character as an Immutable property
 import React, { useEffect } from 'react';
 
 import { DiffDOM, nodeToObj, stringToObj } from 'diff-dom';
+import '../modules/lisp-parser/index';
+import isDOMEvent from '../modules/is-dom-event';
 import walkDOM from '../modules/walk-dom';
 import Layout from '../components/layout';
 import SEO from '../components/seo';
@@ -117,6 +119,7 @@ const parsePropDefinition = def => def.match(/[:@][a-zA-Z\-0-9_\s"{}#]+/g)
 
 const getProps = changeId => props.byId.get(Number(changeId));
 
+
 const updatePropDefinition = (frag) => {
   let id = props.byFrag[frag];
   // same id
@@ -137,8 +140,7 @@ const updatePropDefinition = (frag) => {
       const newValue = isRawValue ? value.substring(1, value.length - 1) : context.getState()[value];
       propsMap[attrName] = newValue;
     }
-    const isEvent = attrType === '@';
-    if (isEvent) {
+    if (isDOMEvent(attrName)) {
       const handler = (ev) => {
         window.emit(ev, ...args);
       };
@@ -235,8 +237,7 @@ const uiTemplate = count => `
     :class "foo bar")
 
     (ui-if
-      :show "count"
-      :data-count wheelChange)
+      :show "count")
     (/ui-if)
 
     (div)
@@ -249,12 +250,12 @@ const uiTemplate = count => `
       (input
         :type "number"
         :value wheelChange
-        @input "setWheelChange"
+        :input "setWheelChange"
       /)
 
       (button
         :type "button"
-        @click "increment" 2
+        :click "increment" 2
       )
         +${count}
       (/button)
@@ -303,8 +304,8 @@ const parseTemplate = (uiTemplate = '') => uiTemplate.replace(/\([\s]*[^]*?\)/g,
   .replace(/\(/, '<')
   // tag close
   .replace(')', '>')
-  // parse all attributes into a data object
-  .replace(/[:@][^\\/\\>]+/g, (frag) => {
+  // parse all attributes into a data object. Attributes are prefixed with `:`
+  .replace(/[:][^\\/\\>]+/g, (frag) => {
     const changeId = updatePropDefinition(frag);
     return `data-props="${changeId}"`;
   })).trim();
