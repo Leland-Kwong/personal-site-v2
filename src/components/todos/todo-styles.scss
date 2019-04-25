@@ -1,0 +1,12 @@
+.TodosApp {
+  font-family: sans-serif;
+
+  button, input {
+    font-family: inherit;
+    font-size: inherit;
+  }
+
+  .TodosApp__Input {
+    text-decoration: inherit;
+  }
+}
